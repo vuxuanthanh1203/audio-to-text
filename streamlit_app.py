@@ -2,11 +2,64 @@ import streamlit as st
 import tempfile
 import subprocess
 import math
+import json
+import os
+from datetime import datetime, timezone
 from groq import Groq
 
 st.set_page_config(page_title="Chuyển giọng nói thành văn bản", page_icon="🎙️")
 
+# Groq giới hạn 25MB/request, nên cắt audio thành từng đoạn 20 phút trước khi gửi.
 CHUNK_SECONDS = 20 * 60
+
+# Giới hạn thật của Groq free tier (không phải "phút/tháng" - đây là 2 giới hạn riêng):
+HOURLY_AUDIO_SECONDS_LIMIT = 7200   # ~120 phút audio / giờ (rolling, không phải cố định 0h-1h)
+DAILY_REQUEST_LIMIT = 2000          # số request / ngày
+
+USAGE_FILE = "/tmp/groq_usage.json"
+
+
+def load_usage():
+    if os.path.exists(USAGE_FILE):
+        try:
+            with open(USAGE_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"hour_key": None, "audio_seconds_this_hour": 0, "date_key": None, "requests_today": 0}
+
+
+def save_usage(usage):
+    with open(USAGE_FILE, "w") as f:
+        json.dump(usage, f)
+
+
+def current_hour_key():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+
+
+def current_date_key():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def get_reset_usage():
+    """Đọc usage hiện tại, tự reset nếu đã sang giờ mới / ngày mới."""
+    usage = load_usage()
+    if usage.get("hour_key") != current_hour_key():
+        usage["hour_key"] = current_hour_key()
+        usage["audio_seconds_this_hour"] = 0
+    if usage.get("date_key") != current_date_key():
+        usage["date_key"] = current_date_key()
+        usage["requests_today"] = 0
+    return usage
+
+
+def record_usage(audio_seconds, n_requests):
+    usage = get_reset_usage()
+    usage["audio_seconds_this_hour"] += audio_seconds
+    usage["requests_today"] += n_requests
+    save_usage(usage)
+    return usage
 
 
 def get_client():
@@ -74,6 +127,21 @@ st.title("🎙️ Chuyển ghi âm thành văn bản (tiếng Việt)")
 st.write("Tải lên file audio (mp3, wav, m4a...), chờ xử lý, nhận lại văn bản kèm timestamp.")
 st.caption("Dùng Groq API (whisper-large-v3) — chất lượng cao, xử lý trên server Groq, không phụ thuộc RAM của app này.")
 
+# --- Hiển thị usage hiện tại ---
+usage = get_reset_usage()
+audio_minutes_used = usage["audio_seconds_this_hour"] / 60
+audio_minutes_limit = HOURLY_AUDIO_SECONDS_LIMIT / 60
+
+col1, col2 = st.columns(2)
+with col1:
+    st.caption(f"Phút audio đã dùng (giờ này): {audio_minutes_used:.1f} / {audio_minutes_limit:.0f} phút")
+    st.progress(min(1.0, audio_minutes_used / audio_minutes_limit))
+with col2:
+    st.caption(f"Request đã dùng (hôm nay): {usage['requests_today']} / {DAILY_REQUEST_LIMIT}")
+    st.progress(min(1.0, usage["requests_today"] / DAILY_REQUEST_LIMIT))
+
+st.divider()
+
 uploaded_file = st.file_uploader(
     "Chọn file audio",
     type=["mp3", "wav", "m4a", "ogg", "flac"],
@@ -112,6 +180,8 @@ if uploaded_file is not None:
                     st.stop()
 
                 segments = transcribe_chunk(client, chunk_path)
+                record_usage(audio_seconds=chunk_len, n_requests=1)
+
                 for seg in segments:
                     seg_start = format_ts(start_sec + seg_field(seg, "start"))
                     seg_end = format_ts(start_sec + seg_field(seg, "end"))
@@ -127,3 +197,4 @@ if uploaded_file is not None:
             data=full_text.strip(),
             file_name="transcript.txt",
         )
+        st.rerun()
