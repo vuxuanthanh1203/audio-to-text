@@ -3,7 +3,7 @@ from faster_whisper import WhisperModel
 
 st.set_page_config(page_title="Chuyển giọng nói thành văn bản", page_icon="🎙️")
 
-MODEL_SIZE = "small"
+MODEL_SIZE = "tiny"
 
 
 @st.cache_resource(show_spinner="Đang tải model (chỉ lần đầu)...")
