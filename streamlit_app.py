@@ -1,14 +1,12 @@
 import streamlit as st
 import tempfile
+import subprocess
 import math
-from pydub import AudioSegment
 from groq import Groq
 
 st.set_page_config(page_title="Chuyển giọng nói thành văn bản", page_icon="🎙️")
 
-# Groq giới hạn 25MB/request, nên cắt audio thành từng đoạn 20 phút trước khi gửi.
-# Sau khi nén mp3 128kbps, 20 phút chỉ khoảng 18-19MB, đủ an toàn dưới giới hạn.
-CHUNK_MS = 20 * 60 * 1000
+CHUNK_SECONDS = 20 * 60
 
 
 def get_client():
@@ -22,14 +20,42 @@ def get_client():
     return Groq(api_key=api_key)
 
 
-def format_ts(ms):
-    total_seconds = int(ms // 1000)
+def format_ts(seconds):
+    total_seconds = int(seconds)
     m, s = divmod(total_seconds, 60)
     return f"{m:02d}:{s:02d}"
 
 
 def seg_field(seg, key):
     return seg[key] if isinstance(seg, dict) else getattr(seg, key)
+
+
+def get_duration_seconds(path):
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            path,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return float(result.stdout.strip())
+
+
+def cut_chunk(input_path, start_sec, duration_sec, output_path):
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-ss", str(start_sec),
+            "-t", str(duration_sec),
+            "-i", input_path,
+            "-acodec", "libmp3lame",
+            "-b:a", "128k",
+            output_path,
+        ],
+        capture_output=True, check=True,
+    )
 
 
 def transcribe_chunk(client, path):
@@ -63,25 +89,32 @@ if uploaded_file is not None:
             input_path = tmp.name
 
         with st.spinner("Đang xử lý audio, tùy độ dài file có thể mất vài phút..."):
-            audio = AudioSegment.from_file(input_path)
-            total_ms = len(audio)
-            n_chunks = max(1, math.ceil(total_ms / CHUNK_MS))
+            try:
+                total_seconds = get_duration_seconds(input_path)
+            except subprocess.CalledProcessError as e:
+                st.error(f"Không đọc được file audio: {e.stderr}")
+                st.stop()
+
+            n_chunks = max(1, math.ceil(total_seconds / CHUNK_SECONDS))
 
             full_text = ""
             progress = st.progress(0, text="Đang gửi từng đoạn tới Groq...")
 
             for i in range(n_chunks):
-                start_ms = i * CHUNK_MS
-                end_ms = min(start_ms + CHUNK_MS, total_ms)
-                chunk = audio[start_ms:end_ms]
+                start_sec = i * CHUNK_SECONDS
+                chunk_len = min(CHUNK_SECONDS, total_seconds - start_sec)
 
                 chunk_path = f"/tmp/chunk_{i}.mp3"
-                chunk.export(chunk_path, format="mp3", bitrate="128k")
+                try:
+                    cut_chunk(input_path, start_sec, chunk_len, chunk_path)
+                except subprocess.CalledProcessError as e:
+                    st.error(f"Lỗi khi cắt đoạn {i + 1}: {e.stderr}")
+                    st.stop()
 
                 segments = transcribe_chunk(client, chunk_path)
                 for seg in segments:
-                    seg_start = format_ts(start_ms + seg_field(seg, "start") * 1000)
-                    seg_end = format_ts(start_ms + seg_field(seg, "end") * 1000)
+                    seg_start = format_ts(start_sec + seg_field(seg, "start"))
+                    seg_end = format_ts(start_sec + seg_field(seg, "end"))
                     text = seg_field(seg, "text").strip()
                     full_text += f"[{seg_start} - {seg_end}] {text}\n"
 
