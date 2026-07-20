@@ -120,7 +120,7 @@ def transcribe_chunk(client, path):
             response_format="verbose_json",
             timestamp_granularities=["segment"],
         )
-    return getattr(result, "segments", []) or []
+    return result
 
 
 st.title("🎙️ Chuyển ghi âm thành văn bản (tiếng Việt)")
@@ -179,14 +179,21 @@ if uploaded_file is not None:
                     st.error(f"Lỗi khi cắt đoạn {i + 1}: {e.stderr}")
                     st.stop()
 
-                segments = transcribe_chunk(client, chunk_path)
+                result = transcribe_chunk(client, chunk_path)
                 record_usage(audio_seconds=chunk_len, n_requests=1)
 
-                for seg in segments:
-                    seg_start = format_ts(start_sec + seg_field(seg, "start"))
-                    seg_end = format_ts(start_sec + seg_field(seg, "end"))
-                    text = seg_field(seg, "text").strip()
-                    full_text += f"[{seg_start} - {seg_end}] {text}\n"
+                segments = getattr(result, "segments", None) or []
+                if segments:
+                    for seg in segments:
+                        seg_start = format_ts(start_sec + seg_field(seg, "start"))
+                        seg_end = format_ts(start_sec + seg_field(seg, "end"))
+                        text = seg_field(seg, "text").strip()
+                        full_text += f"[{seg_start} - {seg_end}] {text}\n"
+                else:
+                    # Groq đôi khi không trả về segments — fallback đọc text tổng.
+                    text = (getattr(result, "text", "") or "").strip()
+                    if text:
+                        full_text += text + "\n"
 
                 progress.progress((i + 1) / n_chunks, text=f"Đã xử lý đoạn {i + 1}/{n_chunks}")
 
@@ -197,4 +204,3 @@ if uploaded_file is not None:
             data=full_text.strip(),
             file_name="transcript.txt",
         )
-        st.rerun()
